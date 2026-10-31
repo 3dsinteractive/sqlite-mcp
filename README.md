@@ -142,4 +142,3 @@ docker run -i --rm sqlite-mcp-server
 # Or run with custom schema.sql file
 docker run -i --rm -v "/path/to/your/schema.sql:/data/schema.sql" sqlite-mcp-server
 ```
-# sqlite-mcp
