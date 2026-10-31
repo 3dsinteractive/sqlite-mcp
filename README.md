@@ -66,17 +66,21 @@ After installation, add the following configuration to your MCP client:
 {
   "mcpServers": {
     "sqlite": {
-      "command": "/path/to/your/sqlite-mcp/build/sqlite-mcp",
-      "args": [
-        "--database",
-        "/path/to/your/database.db"
-      ]
+      "url": "http://localhost:3000/mcp"
     }
   }
 }
 ```
-Args:
+Start the server before connecting the MCP client:
+
+```bash
+./build/sqlite-mcp --database /path/to/your/database.db
+```
+
+Options:
 - `--database, -d`: Path to SQLite database file (required)
+- `--address`: Streamable HTTP listen address (default: `${HOST:-0.0.0.0}:${PORT:-3000}`)
+- `--endpoint`: Streamable HTTP endpoint path (default: `/mcp`)
 - `--debug`: Enable debug mode for verbose logging (optional)
 
 #### Using Docker:
@@ -85,25 +89,15 @@ Args:
 {
   "mcpServers": {
     "sqlite": {
-      "command": "/path/to/your/.docker/bin/docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "sqlite-mcp-server"
-      ]
+      "url": "http://localhost:3000/mcp"
     }
   }
 }
 ```
 
-The above uses `example.sql` to build the example database. To use a custom schema sql, [see the Docker commands below](#docker).
+Start the Docker container before connecting the MCP client. The image uses `example.sql` to build the example database. To use a custom schema SQL file, [see the Docker commands below](#docker).
 
-**Important Note for GUI Applications**: When configuring MCP clients in GUI applications (like Claude Desktop), you must use absolute paths for both the command and database file paths. Do not use:
-- Tilde (`~`) for home directory shortcuts
-- Environment variables like `$HOME` or `$PATH`
-- Relative paths like `./build/sqlite-mcp`
-- Command shortcuts that rely on PATH resolution (like just `docker`)
+The server exposes unauthenticated database write tools. Keep port `3000` bound to localhost unless it is protected by authentication and TLS at a reverse proxy.
 
 ## Development
 
@@ -132,13 +126,17 @@ Available tasks include:
 ./build/sqlite-mcp --database ./build/example.db [--debug]
 ```
 
+Connect an MCP client to `http://localhost:3000/mcp`. A health endpoint is available at `http://localhost:3000/health`.
+
 #### Docker 
 
 - After building the docker image with `task docker-build`, run the Docker container:
 ```bash
 # Run with default example.sql database
-docker run -i --rm sqlite-mcp-server
+docker run --rm -p 127.0.0.1:3000:3000 sqlite-mcp-server
 
 # Or run with custom schema.sql file
-docker run -i --rm -v "/path/to/your/schema.sql:/data/schema.sql" sqlite-mcp-server
+docker run --rm -p 127.0.0.1:3000:3000 -v "/path/to/your/schema.sql:/data/schema.sql:ro" sqlite-mcp-server
 ```
+
+Connect the MCP client to `http://localhost:3000/mcp`.

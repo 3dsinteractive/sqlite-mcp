@@ -1,23 +1,32 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/rvarun11/sqlite-mcp/internal/config"
 	"github.com/rvarun11/sqlite-mcp/internal/handlers"
 	"github.com/rvarun11/sqlite-mcp/internal/logger"
 	"github.com/rvarun11/sqlite-mcp/internal/repository"
-	"os"
-
-	"context"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
-	"os/signal"
-	"syscall"
 )
 
-var dbPath string
+var (
+	dbPath        string
+	listenAddress string
+	endpointPath  string
+)
 
 func main() {
 	var rootCmd = &cobra.Command{
@@ -29,6 +38,8 @@ func main() {
 
 	rootCmd.Flags().StringVarP(&dbPath, "database", "d", "", "Path to SQLite database file (required)")
 	rootCmd.Flags().Bool("debug", false, "Enable debug mode")
+	rootCmd.Flags().StringVar(&listenAddress, "address", defaultListenAddress(), "Streamable HTTP listen address")
+	rootCmd.Flags().StringVar(&endpointPath, "endpoint", "/mcp", "Streamable HTTP endpoint path")
 
 	err := rootCmd.MarkFlagRequired("database")
 	if err != nil {
@@ -113,32 +124,80 @@ func runServer(cmd *cobra.Command, args []string) {
 	)
 	mcpServer.AddTool(executeDatabaseTool, mcpHandler.Execute)
 
-	//Setup graceful shutdown
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	endpointPath, err = normalizeEndpointPath(endpointPath)
+	if err != nil {
+		logger.Fatalf("Invalid HTTP endpoint: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	httpServer := &http.Server{
+		Addr:              listenAddress,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	streamableHTTPServer := server.NewStreamableHTTPServer(
+		mcpServer,
+		server.WithStreamableHTTPServer(httpServer),
+	)
+	mux.Handle(endpointPath, streamableHTTPServer)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 
 	go func() {
-		<-sigChan
-		logger.Info("Received shutdown signal, gracefully shutting down...")
-		cancel()
+		sig := <-sigChan
+		logger.Infof("Received %s, gracefully shutting down...", sig)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := streamableHTTPServer.Shutdown(ctx); err != nil {
+			logger.Errorf("Failed to shut down Streamable HTTP server: %v", err)
+		}
 	}()
 
-	// Start server
-	// TODO: Look into alternatives for transport layer (sse, streamable-http)
-	logger.Info("SQLite MCP Server started successfully")
-	if err := server.ServeStdio(mcpServer); err != nil {
-		fmt.Printf("Server error: %v\n", err)
+	logger.Infof("SQLite MCP Server listening on http://%s%s", listenAddress, endpointPath)
+	if err := streamableHTTPServer.Start(listenAddress); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Fatalf("Streamable HTTP server failed: %v", err)
 	}
 
 	logger.Info("SQLite MCP Server stopped")
 }
 
+func defaultListenAddress() string {
+	host := os.Getenv("HOST")
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func normalizeEndpointPath(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", errors.New("endpoint path cannot be empty")
+	}
+	if strings.ContainsAny(endpoint, "?#") {
+		return "", errors.New("endpoint path cannot contain a query or fragment")
+	}
+
+	normalized := "/" + strings.Trim(endpoint, "/")
+	if normalized == "/health" {
+		return "", errors.New("endpoint path /health is reserved")
+	}
+	return normalized, nil
+}
+
 func syncLogger(logger *zap.SugaredLogger) {
-	if err := logger.Sync(); err != nil {
+	if err := logger.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTTY) {
 		fmt.Fprintf(os.Stderr, "Failed to sync logger: %v\n", err)
 	}
 }
